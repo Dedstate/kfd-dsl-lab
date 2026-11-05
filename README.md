@@ -1,34 +1,90 @@
-# Свой DSL
+# HTTP Response Validation DSL
 
-Создайте DSL для проверки HTTP-ответов и перепишите через него шесть функций `check01`–`check06` из `lesson09.legacy`. Новые проверки должны возвращать список расхождений с ожиданиями.
+A Kotlin DSL for checking HTTP responses in memory. The implementation reports every failed operation rather than returning a single Boolean. The starter response model, legacy checks, JSON parser, and supplied tests are unchanged.
 
-Полное условие, требования к тестам и необязательное усложнение — в [docs/lesson09.md](docs/lesson09.md).
+## Requirements and tests
 
-## Что уже есть в проекте
+Install **JDK 25** and set `JAVA_HOME` to that installation. The project uses Kotlin 2.4.10 and Gradle Wrapper 9.5.1. Run from the repository root:
 
-- `app/src/main/kotlin/lesson09/HttpResponse.kt` — модель ответа.
-- `app/src/main/kotlin/lesson09/legacy/Checks.kt` — шесть исходных проверок.
-- `app/src/main/kotlin/lesson09/support/json/Json.kt` — готовый парсер JSON. Писать свой парсер не нужно.
-- `app/src/test/kotlin/lesson09/LegacySmokeTest.kt` — начальные тесты исходных проверок.
-- `app/src/test/kotlin/lesson09/support/json/JsonParserTest.kt` — тесты готового парсера.
+```bash
+bash ./gradlew clean build
+bash ./gradlew :app:test
+```
 
-Реализацию DSL добавьте в пакет `lesson09.dsl`, свои тесты — в `app/src/test/kotlin/lesson09`. Предоставленные исходники и тесты оставьте без изменений.
+## Example
 
-## Запуск
+```kotlin
+import lesson09.HttpResponse
+import lesson09.dsl.validate
 
-Установите JDK 25 и укажите его в `JAVA_HOME`. В IntelliJ IDEA выберите этот же JDK для Gradle JVM. Gradle устанавливать отдельно не нужно: проект использует Wrapper. При первом запуске нужен доступ к интернету для загрузки Gradle и зависимостей.
+val response = HttpResponse(
+    status = 500,
+    headers = mapOf("content-type" to listOf("text/plain")),
+    body = "{}",
+)
 
-В проекте используются Kotlin 2.4.10, Gradle 9.5.1 и JUnit 6.1.3. Запускайте команды из корня репозитория:
+val result = validate(response) {
+    status { equalTo(200) }
+    header("Content-Type") { startsWith("application/json") }
+    body {
+        json {
+            field("id") { present() }
+        }
+    }
+}
 
-| Действие | Bash | PowerShell |
-|---|---|---|
-| Сборка и тесты | `bash ./gradlew build` | `.\gradlew.bat build` |
-| Тесты | `bash ./gradlew :app:test` | `.\gradlew.bat :app:test` |
+println(result.isValid) // false
+println(result.report())
+```
 
-Начальные тесты должны проходить до начала работы. По мере реализации DSL добавляйте собственные тесты из условия задания.
+Output:
 
-Если продолжаете работу в своём проекте курса, перенесите каталоги `app/src/main/kotlin/lesson09`, `app/src/test/kotlin/lesson09` и файл `docs/lesson09.md`. В модуле должны быть подключены Kotlin/JVM, JUnit Jupiter и `kotlin-test-junit5`, а задача тестирования должна использовать `useJUnitPlatform()`; настройки можно взять из `app/build.gradle.kts` и `gradle/libs.versions.toml`.
+```text
+status: expected 200, actual 500
+headers.Content-Type: expected prefix application/json, actual [text/plain]
+body.json.id: expected present, actual <missing>
+```
 
-## Сдача
+Each `Discrepancy` stores `path`, `expected`, and `actual` separately. `ValidationResult.discrepancies` is empty on success. Each DSL operation produces at most one discrepancy, and duplicates are retained. Failures are reported in DSL declaration order, including the operations of nested blocks at their position in the outer block.
 
-Передайте преподавателю ссылку на свой репозиторий. Добавьте в README пример использования DSL, пример расхождений и объяснение решения.
+## Architecture
+
+`lesson09.dsl.ResponseDsl.kt` defines receiver types `ResponseSpecBuilder`, `StatusRulesBuilder`, `HeaderRulesBuilder`, `BodyRulesBuilder`, `JsonRulesBuilder` and `JsonFieldRulesBuilder`. All carry the same `@ResponseDslMarker` to prevent accidentally calling outer-scope operations from nested blocks. The response receiver supports `status`, `header`, `body`, and `include`. Status supports `equalTo` and `inRange`; headers support `equalTo`, `startsWith`, and `satisfies`; body supports `absentOrEmpty`, `nonEmpty`, and `json`; JSON supports `field`; fields support `present`, typed `equalTo`, and `isNull`.
+
+Header names match case-insensitively. Values from matching keys are concatenated **in map iteration order**, preserving order within each list, without trimming or splitting comma-separated strings. Checks succeed if any value matches; separate checks may match different values. Actual header values are displayed in brackets; `<missing>` means no matching key, `[]` means a matching key with an empty list, and `[""]` means a list containing an empty string. Strings containing commas or surrounding spaces are quoted when displayed.
+
+`null` and `""` count as absent/empty body, while `" "` is nonempty. A `json` operation uses the provided `parseJsonObject` parser, irrespective of Content-Type. Missing body and invalid JSON each produce a single `body.json` discrepancy for that operation; field operations are skipped in that case. Field presence uses `containsKey`, so a present JSON `null` is not confused with a missing field. String, Long, and Boolean comparisons preserve types (an Int expectation is converted to Long to match the parser). Values are formatted with quotes for strings and without quotes for numbers, booleans, and JSON `null`.
+
+`HeaderRulesBuilder.satisfies(description: String, predicate: (String) -> Boolean)` stores a user-provided predicate. When validating, it evaluates values until the first match; it does not call the predicate for a missing header or empty list. The predicate can be supplied as a lambda literal, a function-typed variable, or a function reference.
+
+## Legacy compatibility
+
+`lesson09.dsl.LegacyDslChecks.kt` contains `check01Dsl` through `check06Dsl`, corresponding exactly to `lesson09.legacy.check01` through `check06`. A suitable or unsuitable response has the same success result under each pair. Unlike the original short-circuiting Boolean checks, the DSL reports all independent violations. In particular `check02Dsl` checks only body nonemptiness, **not** whether its content is valid JSON.
+
+## Reusable specifications (optional extension)
+
+```kotlin
+val common = responseSpec {
+    status { equalTo(200) }
+}
+val user = responseSpec {
+    include(common)
+    body {
+        json {
+            field("id") { present() }
+        }
+    }
+}
+val a = user.validate(HttpResponse(200, emptyMap(), "{\"id\":null}"))
+val b = user.validate(HttpResponse(503, emptyMap(), "{}"))
+```
+
+`responseSpec(block: ResponseSpecBuilder.() -> Unit)` executes its receiver lambda **once**, building an immutable ordered list of validation rules `(HttpResponse, MutableList<Discrepancy>) -> Unit`. Sub-builder lambdas (e.g. `StatusRulesBuilder.() -> Unit`) also execute during specification creation and store rules for their level. User predicates `(String) -> Boolean` and the actual value checks execute **only** during `ResponseSpecification.validate(response)`. The specification does not hold an HTTP response, result, or accumulation buffer. Each validation allocates a fresh mutable buffer and returns a separate result with a snapshot of discrepancies. `include` appends the included specification's rules at the declaration position; repeated inclusions repeat checks, and the same common rules can be included in multiple specifications. The implementation does not require `inline`, `noinline`, or `crossinline`.
+
+## Source and tests
+
+- `app/src/main/kotlin/lesson09/dsl/ResponseDsl.kt` — DSL, results, rules, and reusable specifications.
+- `app/src/main/kotlin/lesson09/dsl/LegacyDslChecks.kt` — six DSL equivalents.
+- `app/src/test/kotlin/lesson09/DslValidationTest.kt` — mandatory edge cases, error ordering, predicates, and DSL receiver behavior.
+- `app/src/test/kotlin/lesson09/DslLegacyParityTest.kt` — success and independently violated conditions for all six legacy checks.
+- `app/src/test/kotlin/lesson09/DslSpecificationTest.kt` — optional specification creation, re-use, inclusion, and independence.
